@@ -1,4 +1,5 @@
 //! Read-only CLIProxyAPI files; Antigravity refreshes use a separate Quotio cache.
+mod antigravity_cli;
 mod config;
 
 use super::{AccountError, Credential};
@@ -39,6 +40,8 @@ enum Material {
     Antigravity {
         credential: antigravity_auth::Credential,
         project: Option<String>,
+        cli_profile: Option<String>,
+        email: Option<String>,
     },
 }
 
@@ -145,6 +148,11 @@ impl ProviderAdapter for BorrowedProxyProvider {
                     };
                     self.provider.adapter().fetch(&scoped).await?
                 }
+                Material::Antigravity {
+                    cli_profile: Some(profile),
+                    email: Some(email),
+                    ..
+                } => antigravity_cli::fetch(context, &profile, &email).await?,
                 Material::Antigravity { project, .. } => {
                     let scoped = ProviderContext {
                         http: context.http.clone(),
@@ -353,6 +361,7 @@ fn provider(value: &Value) -> Option<Provider> {
         "gemini" | "gemini-cli" => Some(Provider::Catalog("gemini")),
         "github-copilot" | "copilot" => Some(Provider::Catalog("copilot")),
         "antigravity" => Some(Provider::Antigravity),
+        "opencodego" => Some(Provider::Catalog("opencodego")),
         "kiro" => Some(Provider::Catalog("kiro")),
         "vertex" | "vertexai" => Some(Provider::Catalog("vertexai")),
         _ => None,
@@ -371,6 +380,22 @@ fn material(
         return Err(ProviderError::Unavailable);
     }
     if provider == Provider::Antigravity {
+        let cli_profile = value
+            .get("antigravity_cli_profile")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|id| antigravity_cli::valid_profile_id(id))
+                    .map(str::to_owned)
+                    .ok_or(ProviderError::InvalidData)
+            })
+            .transpose()?;
+        let email = text(value, &["email"])
+            .filter(|email| valid(email, 512))
+            .map(str::to_owned);
+        if cli_profile.is_some() && email.is_none() {
+            return Err(ProviderError::InvalidData);
+        }
         let expires_at = expiry(value)?;
         let expiry = expires_at
             .map(|date| {
@@ -385,7 +410,8 @@ fn material(
         }))
         .map_err(|_| ProviderError::InvalidData)?;
         let credential = antigravity_auth::parse_credential(&bytes)?;
-        if credential.refresh_token.is_none()
+        if cli_profile.is_none()
+            && credential.refresh_token.is_none()
             && expires_at.is_some_and(|expiry| expiry <= now + Duration::minutes(5))
         {
             return Err(ProviderError::OwnerRefreshRequired);
@@ -393,6 +419,8 @@ fn material(
         return Ok(Material::Antigravity {
             credential,
             project: text(value, &["project_id", "projectId", "project"]).map(str::to_owned),
+            cli_profile,
+            email,
         });
     }
     let token_value = if provider == Provider::Catalog("gemini") {
@@ -441,6 +469,7 @@ fn material(
     let mut keys = HashMap::new();
     let key = match provider {
         Provider::Catalog("claude") => "CLAUDE_OAUTH_ACCESS_TOKEN",
+        Provider::Catalog("opencodego") => "OPENCODE_API_KEY",
         Provider::Catalog("gemini") => "GEMINI_OAUTH_ACCESS_TOKEN",
         Provider::Catalog("copilot") => "COPILOT_API_TOKEN",
         Provider::Catalog("kiro") => "KIRO_ACCESS_TOKEN",
@@ -540,6 +569,58 @@ mod tests {
         let path = std::env::temp_dir().join(crate::accounts::random_string().unwrap());
         std::fs::create_dir(&path).unwrap();
         path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn scoped_cli_profiles_require_identity_and_leave_token_renewal_to_agy() {
+        let now = OffsetDateTime::now_utc();
+        let mut value = serde_json::json!({"type":"antigravity", "access_token":"fixture-token",
+            "email":"work@example.test", "expired":"1970-01-01T00:00:00Z", "antigravity_cli_profile":"work-1"});
+        assert!(matches!(
+            material(Provider::Antigravity, &value, now),
+            Ok(Material::Antigravity {
+                cli_profile: Some(_),
+                ..
+            })
+        ));
+        value["antigravity_cli_profile"] = serde_json::json!("../other");
+        assert!(matches!(
+            material(Provider::Antigravity, &value, now),
+            Err(ProviderError::InvalidData)
+        ));
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("antigravity_cli_profile");
+        assert!(matches!(
+            material(Provider::Antigravity, &value, now),
+            Err(ProviderError::OwnerRefreshRequired)
+        ));
+        value["antigravity_cli_profile"] = serde_json::json!("work-1");
+        value.as_object_mut().unwrap().remove("email");
+        assert!(matches!(
+            material(Provider::Antigravity, &value, now),
+            Err(ProviderError::InvalidData)
+        ));
+    }
+
+    #[test]
+    fn opencode_go_access_only_files_use_the_go_provider_key() {
+        let value = serde_json::json!({"type":"opencodego", "access_token":"fixture-go-key"});
+        assert_eq!(provider(&value), Some(Provider::Catalog("opencodego")));
+        let Material::Keys(keys) = material(
+            Provider::Catalog("opencodego"),
+            &value,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap() else {
+            panic!("expected API key material");
+        };
+        assert_eq!(
+            keys.get("OPENCODE_API_KEY").map(String::as_str),
+            Some("fixture-go-key")
+        );
+        assert!(!keys.contains_key("OPENAI_API_KEY"));
     }
 
     #[test]
@@ -729,6 +810,7 @@ mod tests {
             let Material::Antigravity {
                 credential,
                 project,
+                ..
             } = material(Provider::Antigravity, &value, OffsetDateTime::now_utc()).unwrap()
             else {
                 panic!()

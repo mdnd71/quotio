@@ -182,7 +182,7 @@ pub(super) fn window(
         },
     })
 }
-fn summary(value: &Value, now: OffsetDateTime) -> Result<Vec<QuotaWindow>, ProviderError> {
+pub(crate) fn summary(value: &Value, now: OffsetDateTime) -> Result<Vec<QuotaWindow>, ProviderError> {
     let groups = value
         .get("groups")
         .or_else(|| value.pointer("/response/groups"))

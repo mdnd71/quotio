@@ -88,6 +88,14 @@ Each supported key/account has a separate borrowed source;
 `--provider` filters providers and `--account` accepts a reported account ID.
 Quota comes from the existing provider APIs, never from proxy traffic counters.
 
+Antigravity files may explicitly name an `antigravity_cli_profile` registered in
+`~/.agy-profiles/accounts.json`, with the matching `email`. These accounts read
+`agy -p /usage --output-format json` inside that profile instead of the legacy
+Cloud Code quota endpoint. Quotio checks the profile's Keychain identity before
+and after the command; the owning CLI handles token renewal. Only returned quota
+windows are displayed. Profile IDs cannot select arbitrary paths or commands.
+Access-only `opencodego` files use the OpenCode Go usage endpoint.
+
 ## Run
 
 Use Rust stable with edition 2024 support. The package declares Rust 1.89 or newer;
